@@ -1,0 +1,15 @@
+# Scripts and runners.json only. Runner installs live in C:\actions-runner, but guard against one landing here.
+.runner
+.runner_migrated
+.credentials*
+.service
+.env
+bin/
+bin.*/
+externals/
+externals.*/
+_diag/
+_work/
+_packages/
+*.zip
+*.log
