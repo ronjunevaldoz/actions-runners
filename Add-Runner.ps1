@@ -59,9 +59,13 @@ try {
         Write-Step 'Removing the old registration first'
         $old = Get-LocalRunner | Where-Object { $_.Folder -eq $Folder }
         if ($old.ServiceName) { Remove-RunnerService $old.ServiceName $Folder }
-        & .\config.cmd remove --token (New-RunnerToken (Resolve-Repo $old.Repo) remove)
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning 'config.cmd remove failed (GitHub probably deleted the runner already); clearing the local files instead.'
+        $oldRepo = Resolve-Repo $old.Repo
+        # config.cmd remove hangs when GitHub has already deleted the runner, so only call it for one GitHub still has.
+        if (@(Get-RemoteRunner $oldRepo) | Where-Object { $_.id -eq $old.AgentId }) {
+            & .\config.cmd remove --token (New-RunnerToken $oldRepo remove)
+            if ($LASTEXITCODE -ne 0) { throw "config.cmd remove failed (exit $LASTEXITCODE)." }
+        } else {
+            Write-Host 'GitHub no longer has this runner; clearing the local registration files.'
             Clear-LocalRegistration $Folder
         }
     }
