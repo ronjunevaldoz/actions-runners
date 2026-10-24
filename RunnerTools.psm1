@@ -117,7 +117,8 @@ function Remove-RunnerService([string]$ServiceName, [string]$Folder) {
 function Clear-LocalRegistration([string]$Folder) {
     # What config.cmd remove deletes locally; used when GitHub no longer knows the runner, so config.cmd remove can't run.
     foreach ($file in '.runner', '.runner_migrated', '.credentials', '.credentials_rsaparams', '.credentials_migrated', '.service') {
-        Remove-Item (Join-Path $Folder $file) -Force -ErrorAction SilentlyContinue
+        $path = Join-Path $Folder $file
+        if (Test-Path $path) { Remove-Item $path -Force }
     }
 }
 
