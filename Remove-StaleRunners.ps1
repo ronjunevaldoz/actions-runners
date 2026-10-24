@@ -11,7 +11,7 @@ GitHub; only confirm the ones you know are dead.
 .EXAMPLE
 .\Remove-StaleRunners.ps1 -WhatIf
 .EXAMPLE
-.\Remove-StaleRunners.ps1 -Repo ronjunevaldoz/golearnph -IncludeLocal
+.\Remove-StaleRunners.ps1 -Repo my-org/my-app -IncludeLocal
 #>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(

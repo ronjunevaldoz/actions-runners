@@ -3,7 +3,7 @@
 Installs an already-registered runner as a Windows service running as NETWORK SERVICE, the way config.cmd --runasservice does.
 
 .EXAMPLE
-.\Install-RunnerService.ps1 -Name golearnph-runner
+.\Install-RunnerService.ps1 -Name my-app-runner
 #>
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$Name)

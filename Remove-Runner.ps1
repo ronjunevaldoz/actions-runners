@@ -9,9 +9,9 @@ Without a local folder (runner lives on another machine or is gone): deletes it 
 Asks before each change; -Confirm:$false skips that.
 
 .EXAMPLE
-.\Remove-Runner.ps1 -Name golearnph-runner
+.\Remove-Runner.ps1 -Name my-app-runner
 .EXAMPLE
-.\Remove-Runner.ps1 -Name old-runner -Repo ronjunevaldoz/golearnph   # API delete, no local folder
+.\Remove-Runner.ps1 -Name old-runner -Repo my-org/my-app   # API delete, no local folder
 #>
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(

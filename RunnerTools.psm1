@@ -34,7 +34,7 @@ function Assert-Gh {
 }
 
 function Resolve-Repo([string]$Repo) {
-    # Follows renames (awakekt/awake-pro -> awakekt/awake-studio) so API calls and comparisons use the current name.
+    # Follows renames (my-org/old-name -> my-org/new-name) so API calls and comparisons use the current name.
     if ($Repo -notmatch '^[\w.-]+/[\w.-]+$') { throw "'$Repo' isn't owner/name." }
     Invoke-Gh api "repos/$Repo" --jq .full_name
 }

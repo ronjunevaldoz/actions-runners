@@ -4,7 +4,7 @@ Stops and deletes a runner's Windows service but keeps it registered, so it can 
 To get rid of the runner itself, use Remove-Runner.ps1.
 
 .EXAMPLE
-.\Uninstall-RunnerService.ps1 -Name golearnph-runner
+.\Uninstall-RunnerService.ps1 -Name my-app-runner
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param([Parameter(Mandatory)][string]$Name)

@@ -14,7 +14,7 @@ Problems column:
 .EXAMPLE
 .\Get-Runners.ps1
 .EXAMPLE
-.\Get-Runners.ps1 -Repo ronjunevaldoz/golearnph | Format-List
+.\Get-Runners.ps1 -Repo my-org/my-app | Format-List
 #>
 [CmdletBinding()]
 param([string[]]$Repo = @())

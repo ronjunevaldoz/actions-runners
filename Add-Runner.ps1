@@ -3,9 +3,9 @@
 Registers a self-hosted runner for a repository and (by default) installs it as a Windows service.
 
 .EXAMPLE
-.\Add-Runner.ps1 -Repo ronjunevaldoz/golearnph -Labels android,gradle
+.\Add-Runner.ps1 -Repo my-org/my-app -Labels android,gradle
 .EXAMPLE
-.\Add-Runner.ps1 -Repo awakekt/awake-studio -Name awake-pro-runner -Replace   # re-register an existing runner
+.\Add-Runner.ps1 -Repo my-org/my-app -Name my-app-runner -Replace   # re-register an existing runner
 #>
 [CmdletBinding()]
 param(
