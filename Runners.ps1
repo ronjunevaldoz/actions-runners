@@ -120,7 +120,12 @@ function Add-Runner {
     if ($repo -notmatch '^[\w.-]+/[\w.-]+$') { throw "'$repo' isn't owner/name." }
     $repo = Resolve-Repo $repo
     $taken = @((Get-Remote $repo).name)
-    $default = ($repo -split '/')[1] + '-runner'
+    # The suggested name is the first free one: <repo>-runner, then <repo>-runner-2, -3, ... skipping names GitHub has
+    # registered and folders already in $root, so taking the default adds a runner instead of replacing one.
+    $base = ($repo -split '/')[1] + '-runner'
+    $folders = @((Get-ChildItem $root -Directory -ErrorAction SilentlyContinue).Name)
+    $default = $base
+    for ($n = 2; ($taken -contains $default) -or ($folders -contains $default); $n++) { $default = "$base-$n" }
     $name = (Read-Host "Runner name [$default]").Trim()
     if (-not $name) { $name = $default }
     $labels = (Read-Host 'Extra labels, comma-separated (optional, e.g. golearn)').Trim() -replace '\s', ''
