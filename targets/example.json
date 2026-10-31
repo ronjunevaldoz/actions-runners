@@ -1,0 +1,6 @@
+{
+  "repo": "my-org/my-app",
+  "labels": "docker",
+  "memory": "4g",
+  "cpus": 2
+}
