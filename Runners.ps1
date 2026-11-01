@@ -1,5 +1,13 @@
 # Manages the self-hosted GitHub Actions runners on this computer. Double-click "Runners.cmd" to open the menu.
 # Runners live in C:\actions-runner\<name>, one per repository, each installed as a Windows service.
+# Also runs without the menu (as administrator), for scripts:
+#   .\Runners.ps1 recover|watch|install-watchdog|uninstall-watchdog [-Target <name>] [-Interval <minutes>]
+param(
+    [Parameter(Position = 0)][ValidateSet('menu', 'recover', 'watch', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
+    [string]$Target,      # targets\<Target>.local.json: the repository and labels recover re-registers a runner with
+    [switch]$Unattended,  # used by the watchdog task: report goes to its log, offline runners get a grace period
+    [int]$Interval = 5    # minutes between checks, for watch and install-watchdog
+)
 $ErrorActionPreference = 'Stop'
 $root = 'C:\actions-runner'
 # Older hand-made installs registered straight into these folders; scanned so leftovers there get cleaned up too.
@@ -115,27 +123,9 @@ function Get-RunnerZip {
     $zip
 }
 
-function Add-Runner {
-    $repo = (Read-Host 'Repository (owner/name)').Trim()
-    if ($repo -notmatch '^[\w.-]+/[\w.-]+$') { throw "'$repo' isn't owner/name." }
-    $repo = Resolve-Repo $repo
-    $taken = @((Get-Remote $repo).name)
-    # The suggested name is the first free <host>-windows-<n> (host = this computer's name), skipping names GitHub has
-    # registered and folders already in $root, so taking the default adds a runner instead of replacing one.
-    $base = $env:COMPUTERNAME.ToLower() + '-windows-'
-    $folders = @((Get-ChildItem $root -Directory -ErrorAction SilentlyContinue).Name)
-    for ($n = 1; ($taken -contains "$base$n") -or ($folders -contains "$base$n"); $n++) { }
-    $default = "$base$n"
-    $name = (Read-Host "Runner name [$default]").Trim()
-    if (-not $name) { $name = $default }
-    $labels = (Read-Host 'Extra labels, comma-separated (optional, e.g. golearn)').Trim() -replace '\s', ''
-    $replace = $false
-    if ($taken -contains $name) {
-        if (-not (Ask "$repo already has a runner named $name. Replace it?")) { return }
-        $replace = $true
-    }
-
-    # Reuse this runner's old folder if there is one, else C:\actions-runner\<name>.
+# Registers $name for $repo in the runner's folder (its old one, else C:\actions-runner\<name>) and installs the
+# service. Recover reuses it to re-register a broken runner under the same name.
+function Register-Runner($repo, $name, $labels, $replace) {
     $old = Get-Local | Where-Object { $_.Name -eq $name -and $_.Folder -like "$root\*" } | Select-Object -First 1
     $dir = if ($old) { $old.Folder } else { "$root\$name" }
     if (-not (Test-Path "$dir\config.cmd")) {
@@ -155,6 +145,28 @@ function Add-Runner {
     Push-Location $dir
     try { & .\config.cmd @cfg } finally { Pop-Location }
     if ($LASTEXITCODE -ne 0) { throw 'config.cmd failed.' }
+}
+
+function Add-Runner {
+    $repo = (Read-Host 'Repository (owner/name)').Trim()
+    if ($repo -notmatch '^[\w.-]+/[\w.-]+$') { throw "'$repo' isn't owner/name." }
+    $repo = Resolve-Repo $repo
+    $taken = @((Get-Remote $repo).name)
+    # The suggested name is the first free <host>-windows-<n> (host = this computer's name), skipping names GitHub has
+    # registered and folders already in $root, so taking the default adds a runner instead of replacing one.
+    $base = $env:COMPUTERNAME.ToLower() + '-windows-'
+    $folders = @((Get-ChildItem $root -Directory -ErrorAction SilentlyContinue).Name)
+    for ($n = 1; ($taken -contains "$base$n") -or ($folders -contains "$base$n"); $n++) { }
+    $default = "$base$n"
+    $name = (Read-Host "Runner name [$default]").Trim()
+    if (-not $name) { $name = $default }
+    $labels = (Read-Host 'Extra labels, comma-separated (optional, e.g. golearn)').Trim() -replace '\s', ''
+    $replace = $false
+    if ($taken -contains $name) {
+        if (-not (Ask "$repo already has a runner named $name. Replace it?")) { return }
+        $replace = $true
+    }
+    Register-Runner $repo $name $labels $replace
     $runsOn = @('self-hosted', 'Windows') + @($labels -split ',' | Where-Object { $_ })
     Write-Host "Done. Workflows in $repo can use: runs-on: [$($runsOn -join ', ')]" -ForegroundColor Green
 }
@@ -198,14 +210,42 @@ function Clear-Leftovers {
     }
 }
 
+. "$PSScriptRoot\lib\Watchdog.ps1"
+. "$PSScriptRoot\lib\RecoverWindows.ps1"
+
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($Unattended) { Start-WatchdogLog 'windows' }
 & gh auth status *> $null
-if ($LASTEXITCODE -ne 0) { Write-Host 'gh is not signed in. Run: gh auth login' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'gh is not signed in. Run: gh auth login' -ForegroundColor Red
+    if ($Unattended) { Stop-Transcript | Out-Null } elseif ($Command -eq 'menu') { Read-Host 'Press Enter to close' }
+    exit 1
+}
+
+# Commands without the menu: they all need admin (services, scheduled task), and print errors instead of prompting.
+if ($Command -ne 'menu') {
+    $code = 0
+    try {
+        if (-not $admin) { throw "$Command needs admin rights: run it from an elevated PowerShell, or use Runners.cmd." }
+        switch ($Command) {
+            'recover' { Invoke-Recover }
+            'watch' { Start-Watch $Interval { Invoke-Recover } }
+            'install-watchdog' { Import-WindowsTarget; Install-Watchdog 'windows' $PSCommandPath $Target 'Highest' $Interval }
+            'uninstall-watchdog' { Uninstall-Watchdog 'windows' }
+        }
+    } catch {
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        $code = 1
+    }
+    if ($Unattended) { Stop-Transcript | Out-Null }
+    exit $code
+}
+
 if (-not $admin) { Write-Host 'Not running as administrator: listing works, but adding or removing a runner needs Runners.cmd (it asks for admin).' -ForegroundColor Yellow }
 
 while ($true) {
     Write-Host ''
-    Write-Host 'GitHub runners: 1) List  2) Add  3) Remove  4) Clean up leftovers  Q) Quit' -ForegroundColor Cyan
+    Write-Host 'GitHub runners: 1) List  2) Add  3) Remove  4) Clean up leftovers  5) Recover  6) Install watchdog  7) Remove watchdog  Q) Quit' -ForegroundColor Cyan
     $choice = Read-Host 'Choose'
     try {
         switch ($choice) {
@@ -213,6 +253,13 @@ while ($true) {
             '2' { Add-Runner }
             '3' { Remove-Runner }
             '4' { Clear-Leftovers }
+            '5' {
+                $script:Target = Select-Target 'repository and labels to re-register with'
+                $script:Interactive = $true
+                try { Invoke-Recover } finally { $script:Interactive = $false }
+            }
+            '6' { Read-WatchdogInstall 'windows' $PSCommandPath 'Highest' }
+            '7' { Read-WatchdogRemove 'windows' }
             { $_ -match '^[qQ]?$' } { exit 0 }
         }
     } catch {
