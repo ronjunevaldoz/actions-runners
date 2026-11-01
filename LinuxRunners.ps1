@@ -32,6 +32,15 @@ $Tag = 'actions-runners.name'   # container label holding the runner name; marks
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Ask($question) { (Read-Host "$question (y/N)") -match '^y' }
 
+# Runs docker only to test whether it succeeds. Windows PowerShell turns a redirected stderr line from a native
+# command into an error record, and with ErrorActionPreference Stop that throws (for example "no such volume" when
+# checking that a volume is free), so this lowers the preference for the probe alone and reads the exit code.
+function Test-Docker {
+    $ErrorActionPreference = 'Continue'
+    & docker @args *> $null
+    $LASTEXITCODE -eq 0
+}
+
 function Invoke-Docker {
     $out = & docker @args
     if ($LASTEXITCODE -ne 0) { throw "docker $($args[0]) failed (exit $LASTEXITCODE)." }
@@ -40,8 +49,7 @@ function Invoke-Docker {
 
 function Assert-Docker {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'docker not found. Install Docker Desktop.' }
-    & docker info --format '{{.ServerVersion}}' *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not running. Start it, wait for "Engine running", and try again.' }
+    if (-not (Test-Docker info --format '{{.ServerVersion}}')) { throw 'Docker Desktop is not running. Start it, wait for "Engine running", and try again.' }
 }
 
 # Fills parameters the caller didn't pass from the target file, so command-line values always win.
@@ -146,8 +154,7 @@ function Add-LinuxRunner($value) {
     $name = Resolve-Name $value
     $box = "gh-runner-$name"
     if (@(Get-Containers).Container -contains $box) { throw "A container named $box already exists. Remove it first, or pick another number." }
-    & docker volume inspect $box *> $null
-    if ($LASTEXITCODE -eq 0) { throw "A volume named $box is left over. Delete it first: docker volume rm $box" }
+    if (Test-Docker volume inspect $box) { throw "A volume named $box is left over. Delete it first: docker volume rm $box" }
     $labelList = ($Labels -replace '\s', '').Trim(',')
 
     Write-Host "Get a token: $($scope.Page)/new (the --token value; it expires in an hour)."
@@ -162,7 +169,7 @@ function Add-LinuxRunner($value) {
             $(if ($labelList) { " --labels '$labelList'" } else { '' }) + $(if ($Replace) { ' --replace' } else { '' })
         $token | & docker run --rm -i -v "${box}:/home/runner" --entrypoint bash $Image -c $cfg
         if ($LASTEXITCODE -ne 0) {
-            & docker volume rm $box *> $null
+            Test-Docker volume rm $box | Out-Null
             throw 'config.sh failed. Check the token is fresh and for this target; if the name is taken on GitHub, delete it there or use -Replace.'
         }
     } finally { $token = $null; [GC]::Collect() }
