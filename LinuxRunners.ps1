@@ -1,10 +1,10 @@
 # Manages the Linux self-hosted runners on this computer: Docker Desktop containers built from GitHub's runner image.
-# Double-click "LinuxRunners.cmd" for the menu, or run: .\LinuxRunners.ps1 add|remove|status|adopt ... (see README).
+# Double-click "LinuxRunners.cmd" for the menu, or run: .\LinuxRunners.ps1 add|remove|status|adopt|recover ... (see README).
 # Runner names are <host>-linux-<n> (host = this computer's name, lowercased; -Prefix overrides it).
 # Each runner is a container and a volume (the runner's files and work folder), both named gh-runner-<runner name>.
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)][ValidateSet('menu', 'add', 'remove', 'status', 'adopt')][string]$Command = 'menu',
+    [Parameter(Position = 0)][ValidateSet('menu', 'add', 'remove', 'status', 'adopt', 'recover', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
     # A number (2 -> <host>-linux-2) or a runner name. For remove: also a container name. For adopt: a container name.
     [Parameter(Position = 1)][string]$Runner,
     [string]$Repo,     # owner/name, for a repository runner
@@ -12,15 +12,18 @@ param(
     [string]$Target,   # reads defaults from targets\<Target>.local.json (git-ignored) or targets\<Target>.json
     [string]$Prefix = [Environment]::MachineName,
     [string]$Labels = 'docker',
-    # Per-container limits. About 4 GB suits one Gradle build; '' or 0 means no limit. Containers a job starts on
-    # the host's Docker engine (services, docker build) are siblings and don't count against these.
-    [string]$Memory = '4g',
+    # Per-container limits; '' or 0 means no limit. Gradle/KMP builds get OOM-killed (and wedge the runner) under
+    # about 8 GB; heavy ones want 16g or 0. Containers a job starts on the host's Docker engine (services,
+    # docker build) are siblings and don't count against these.
+    [string]$Memory = '8g',
     [double]$Cpus = 2,
     # Read the registration token from the clipboard instead of typing it. The clipboard is cleared afterwards.
     [switch]$FromClipboard,
     # Take over a name GitHub already has registered (e.g. after rebuilding a runner). Off by default so adding
     # can't silently steal the registration of a runner that is still running somewhere.
-    [switch]$Replace
+    [switch]$Replace,
+    # Used by the watchdog task: the recover report goes to its log, and offline runners get a grace period.
+    [switch]$Unattended
 )
 $ErrorActionPreference = 'Stop'
 $Bound = $PSBoundParameters   # what the caller passed; a target file never overrides these
@@ -28,6 +31,9 @@ $Bound = $PSBoundParameters   # what the caller passed; a target file never over
 # into its volume, so existing runners don't need a new image.
 $Image = 'ghcr.io/actions/actions-runner:2.338.0'
 $Tag = 'actions-runners.name'   # container label holding the runner name; marks containers this script manages
+
+. "$PSScriptRoot\lib\Watchdog.ps1"
+. "$PSScriptRoot\lib\RecoverLinux.ps1"
 
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Ask($question) { (Read-Host "$question (y/N)") -match '^y' }
@@ -55,9 +61,7 @@ function Assert-Docker {
 # Fills parameters the caller didn't pass from the target file, so command-line values always win.
 function Import-Target {
     if (-not $Target) { return }
-    $file = @("$PSScriptRoot\targets\$Target.local.json", "$PSScriptRoot\targets\$Target.json") | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $file) { throw "No targets\$Target.local.json or targets\$Target.json. Copy targets\example.json to start one." }
-    $cfg = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+    $cfg = Read-TargetFile $Target
     foreach ($key in 'Repo', 'Org', 'Prefix', 'Labels', 'Memory', 'Cpus') {
         $value = $cfg.($key.ToLower())
         if ($null -ne $value -and -not $Bound.ContainsKey($key)) { Set-Variable -Scope Script -Name $key -Value $value }
@@ -97,7 +101,8 @@ function Get-Containers {
         if (-not $name -and $info.Config.Image -notlike 'ghcr.io/actions/actions-runner*') { continue }
         $vol = $info.Mounts | Where-Object { $_.Destination -eq '/home/runner' -and $_.Type -eq 'volume' } | Select-Object -First 1
         [pscustomobject]@{ Container = $c.Names; Runner = $name; Managed = [bool]$name; State = $c.Status; Volume = $vol.Name
-            Page = $info.Config.Labels.'actions-runners.page'; Memory = $info.HostConfig.Memory; Cpus = $info.HostConfig.NanoCpus / 1e9 }
+            Page = $info.Config.Labels.'actions-runners.page'; Memory = $info.HostConfig.Memory; Cpus = $info.HostConfig.NanoCpus / 1e9
+            Run = $info.State; Restart = $info.HostConfig.RestartPolicy.Name }
     }
 }
 
@@ -140,6 +145,26 @@ function Start-RunnerContainer($container, $runner, $volume, $page) {
     Invoke-Docker @run | Out-Null
 }
 
+# Runs config.sh in a throwaway container against the runner's volume. The token goes in on stdin, so it never appears
+# in a command line, an environment variable or the runner container's config. The volume keeps the registration.
+# No double quotes in $cfg: Windows PowerShell mangles them in native arguments. Tokens are alphanumeric.
+# $reset first deletes the old registration in the volume, so recover can re-register a runner under the same name.
+function Register-Volume($volume, $name, $url, $labelList, $token, $replace, $reset) {
+    $cfg = 'cd /home/runner && ' +
+        $(if ($reset) { 'rm -f .runner .runner_migrated .credentials .credentials_migrated .credentials_rsaparams && ' } else { '' }) +
+        "read -r RUNNER_TOKEN && RUNNER_TOKEN=`${RUNNER_TOKEN%`$'\r'} && " +
+        "./config.sh --unattended --url '$url' --token `$RUNNER_TOKEN --name '$name' --work _work" +
+        $(if ($labelList) { " --labels '$labelList'" } else { '' }) + $(if ($replace) { ' --replace' } else { '' })
+    $token | & docker run --rm -i -v "${volume}:/home/runner" --entrypoint bash $Image -c $cfg | Out-Host
+    $LASTEXITCODE -eq 0
+}
+
+# Docker sizes like 512m or 8g, in bytes.
+function ConvertTo-Bytes($size) {
+    if ("$size" -notmatch '^(\d+(?:\.\d+)?)([bkmg]?)b?$') { return $null }
+    [double]$Matches[1] * @{ '' = 1; 'b' = 1; 'k' = 1KB; 'm' = 1MB; 'g' = 1GB }[$Matches[2].ToLower()]
+}
+
 function Get-NextNumber {
     $pattern = "^$([regex]::Escape($Prefix.ToLower()))-linux-(\d+)$"
     $used = @(Get-Containers | Where-Object { $_.Runner -match $pattern } | ForEach-Object { [int]($_.Runner -replace $pattern, '$1') })
@@ -156,19 +181,15 @@ function Add-LinuxRunner($value) {
     if (@(Get-Containers).Container -contains $box) { throw "A container named $box already exists. Remove it first, or pick another number." }
     if (Test-Docker volume inspect $box) { throw "A volume named $box is left over. Delete it first: docker volume rm $box" }
     $labelList = ($Labels -replace '\s', '').Trim(',')
+    if ($Memory -and $Memory -ne '0' -and (ConvertTo-Bytes $Memory) -lt 8GB) {
+        Write-Host "Memory limit $Memory is under 8g: a Gradle/KMP build can get OOM-killed and wedge the runner. Heavy builds want -Memory 16g (or 0)." -ForegroundColor Yellow
+    }
 
     Write-Host "Get a token: $($scope.Page)/new (the --token value; it expires in an hour)."
     $token = Read-Token
     try {
         Step "Registering $name for $($scope.Url)"
-        # The token goes in on stdin of a throwaway container, so it never appears in a command line,
-        # an environment variable or the runner container's config. The volume keeps the registration.
-        # No double quotes in $cfg: Windows PowerShell mangles them in native arguments. Tokens are alphanumeric.
-        $cfg = "cd /home/runner && read -r RUNNER_TOKEN && RUNNER_TOKEN=`${RUNNER_TOKEN%`$'\r'} && " +
-            "./config.sh --unattended --url '$($scope.Url)' --token `$RUNNER_TOKEN --name '$name' --work _work" +
-            $(if ($labelList) { " --labels '$labelList'" } else { '' }) + $(if ($Replace) { ' --replace' } else { '' })
-        $token | & docker run --rm -i -v "${box}:/home/runner" --entrypoint bash $Image -c $cfg
-        if ($LASTEXITCODE -ne 0) {
+        if (-not (Register-Volume $box $name $scope.Url $labelList $token $Replace $false)) {
             Test-Docker volume rm $box | Out-Null
             throw 'config.sh failed. Check the token is fresh and for this target; if the name is taken on GitHub, delete it there or use -Replace.'
         }
@@ -213,7 +234,7 @@ function Invoke-Adopt($value) {
 function Show-Menu {
     while ($true) {
         Write-Host ''
-        Write-Host 'Linux Docker runners: 1) Status  2) Add  3) Remove  4) Adopt existing container  Q) Quit' -ForegroundColor Cyan
+        Write-Host 'Linux Docker runners: 1) Status  2) Add  3) Remove  4) Adopt existing container  5) Recover  6) Watchdog on/off  Q) Quit' -ForegroundColor Cyan
         $choice = Read-Host 'Choose'
         try {
             switch ($choice) {
@@ -231,6 +252,8 @@ function Show-Menu {
                 }
                 '3' { Show-Status; Remove-LinuxRunner (Read-Host 'Runner or container name').Trim() }
                 '4' { Show-Status; Invoke-Adopt (Read-Host 'Container name to adopt').Trim() }
+                '5' { Invoke-LinuxRecover }
+                '6' { Switch-Watchdog 'linux' $PSCommandPath 'Limited' }
                 { $_ -match '^[qQ]?$' } { return }
             }
         } catch {
@@ -239,7 +262,9 @@ function Show-Menu {
     }
 }
 
+$code = 0
 try {
+    if ($Unattended) { Start-WatchdogLog 'linux' }
     Assert-Docker
     Import-Target
     switch ($Command) {
@@ -248,9 +273,14 @@ try {
         'remove' { Remove-LinuxRunner $Runner }
         'status' { Show-Status }
         'adopt' { Invoke-Adopt $Runner }
+        'recover' { Invoke-LinuxRecover }
+        'install-watchdog' { Install-Watchdog 'linux' $PSCommandPath $Target 'Limited' }
+        'uninstall-watchdog' { Uninstall-Watchdog 'linux' }
     }
 } catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
     if ($Command -eq 'menu') { Read-Host 'Press Enter to close' }
-    exit 1
+    $code = 1
 }
+if ($Unattended) { Stop-Transcript | Out-Null }
+exit $code
