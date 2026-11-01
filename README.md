@@ -146,3 +146,27 @@ login in your profile, and Docker Desktop only runs then too. A runner that is u
 itself, so the watchdog restarts it only once it has seen it like that for 4 minutes (its next run); `recover` run
 by hand acts at once. Reports go to `%LOCALAPPDATA%\actions-runners\windows-watchdog.log` and `linux-watchdog.log`
 (rolled over at 1 MB).
+
+## Keeping builds fast (Defender exclusions)
+
+Microsoft Defender scans every file a build reads and writes. On a dedicated build machine that means it scans the
+runner's checkouts, the Gradle and Kotlin/Native caches and Docker Desktop's virtual disks on every build, which
+slows a heavy Gradle or Kotlin Multiplatform build enough that it can exhaust memory and leave a runner wedged (the
+same failure [Memory](#memory) and the [watchdog](#recover-and-the-watchdog) deal with after the fact). Excluding
+those folders makes it happen far less often.
+
+Double-click **`DefenderExclusions.cmd`** (it asks for admin rights once, which Defender changes need) for a menu:
+
+1. **Add exclusions (paths + build/Docker processes)** — the folders below, plus skipping the runner, Java and
+   Docker processes. The bigger speed-up, and only sensible on a box dedicated to builds.
+2. **Add exclusions (paths only)** — the folders alone, which already cover most of the build I/O.
+3. **Show current exclusions** — each entry this script manages and whether Defender already has it.
+4. **Remove the exclusions this script manages** — leaves any exclusion you set by hand untouched.
+
+The exact paths and processes are listed in variables at the top of `DefenderExclusions.ps1`, so you can read what
+will be added before adding it. Paths: `C:\actions-runner`, and under your profile `.gradle`, `.konan`, `.m2`,
+`.android`, plus `%LOCALAPPDATA%\Docker`. Adding is safe to repeat — Defender ignores a duplicate.
+
+> **Trade-off.** An exclusion tells Defender not to scan there, so keep these folders to build work only, and only
+> register runners with your own private repositories (as the Linux [Security](#linux-docker-runners) note already
+> says). The paths-only option is the conservative choice if you would rather not exclude whole processes.
