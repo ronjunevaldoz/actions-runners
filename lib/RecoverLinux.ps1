@@ -85,6 +85,8 @@ function Invoke-LinuxRecover {
                 else { $report += New-ReportRow $c.Runner $c.Container $problem "none yet: may be updating, retry in $GraceMinutes min"; continue }
             }
             if (-not $fix) { $report += New-ReportRow $c.Runner $c.Container $problem 'none'; continue }
+            $verb = if ($fix -eq 'Register') { 'Re-register it under the same name' } else { "docker $($fix.ToLower()) $($c.Container)" }
+            if (-not (Confirm-Fix $c.Runner $problem $verb)) { $report += New-ReportRow $c.Runner $c.Container $problem 'skipped'; continue }
             $did = switch ($fix) {
                 'Register' { Reset-Registration $c $api }
                 'Start' { Invoke-Docker start $c.Container | Out-Null; 'docker start' }

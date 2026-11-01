@@ -1,10 +1,12 @@
 # Manages the self-hosted GitHub Actions runners on this computer. Double-click "Runners.cmd" to open the menu.
 # Runners live in C:\actions-runner\<name>, one per repository, each installed as a Windows service.
-# Also runs without the menu (as administrator): .\Runners.ps1 recover|install-watchdog|uninstall-watchdog [-Target <name>]
+# Also runs without the menu (as administrator), for scripts:
+#   .\Runners.ps1 recover|watch|install-watchdog|uninstall-watchdog [-Target <name>] [-Interval <minutes>]
 param(
-    [Parameter(Position = 0)][ValidateSet('menu', 'recover', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
+    [Parameter(Position = 0)][ValidateSet('menu', 'recover', 'watch', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
     [string]$Target,      # targets\<Target>.local.json: the repository and labels recover re-registers a runner with
-    [switch]$Unattended   # used by the watchdog task: report goes to its log, offline runners get a grace period
+    [switch]$Unattended,  # used by the watchdog task: report goes to its log, offline runners get a grace period
+    [int]$Interval = 5    # minutes between checks, for watch and install-watchdog
 )
 $ErrorActionPreference = 'Stop'
 $root = 'C:\actions-runner'
@@ -227,7 +229,8 @@ if ($Command -ne 'menu') {
         if (-not $admin) { throw "$Command needs admin rights: run it from an elevated PowerShell, or use Runners.cmd." }
         switch ($Command) {
             'recover' { Invoke-Recover }
-            'install-watchdog' { Import-WindowsTarget; Install-Watchdog 'windows' $PSCommandPath $Target 'Highest' }
+            'watch' { Start-Watch $Interval { Invoke-Recover } }
+            'install-watchdog' { Import-WindowsTarget; Install-Watchdog 'windows' $PSCommandPath $Target 'Highest' $Interval }
             'uninstall-watchdog' { Uninstall-Watchdog 'windows' }
         }
     } catch {
@@ -242,7 +245,7 @@ if (-not $admin) { Write-Host 'Not running as administrator: listing works, but 
 
 while ($true) {
     Write-Host ''
-    Write-Host 'GitHub runners: 1) List  2) Add  3) Remove  4) Clean up leftovers  5) Recover  6) Watchdog on/off  Q) Quit' -ForegroundColor Cyan
+    Write-Host 'GitHub runners: 1) List  2) Add  3) Remove  4) Clean up leftovers  5) Recover  6) Install watchdog  7) Remove watchdog  Q) Quit' -ForegroundColor Cyan
     $choice = Read-Host 'Choose'
     try {
         switch ($choice) {
@@ -250,8 +253,13 @@ while ($true) {
             '2' { Add-Runner }
             '3' { Remove-Runner }
             '4' { Clear-Leftovers }
-            '5' { Invoke-Recover }
-            '6' { Switch-Watchdog 'windows' $PSCommandPath 'Highest' }
+            '5' {
+                $script:Target = Select-Target 'repository and labels to re-register with'
+                $script:Interactive = $true
+                try { Invoke-Recover } finally { $script:Interactive = $false }
+            }
+            '6' { Read-WatchdogInstall 'windows' $PSCommandPath 'Highest' }
+            '7' { Read-WatchdogRemove 'windows' }
             { $_ -match '^[qQ]?$' } { exit 0 }
         }
     } catch {

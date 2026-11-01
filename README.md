@@ -10,8 +10,11 @@ Double-click **`Runners.cmd`**. Windows asks for admin rights once, then a menu 
 3. **Remove** a runner: pick it by number. It deletes the service and the registration, and optionally the folder.
 4. **Clean up leftovers**: registrations GitHub has forgotten, offline runners with no folder here, and folders
    with nothing registered in them. Asks before each one.
-5. **Recover**: brings back runners that are stuck (see [Recover and the watchdog](#recover-and-the-watchdog)).
-6. **Watchdog on/off**: runs Recover every 5 minutes in the background, so a crashed runner comes back by itself.
+5. **Recover**: brings back runners that are stuck (see [Recover and the watchdog](#recover-and-the-watchdog)). Offers
+   your saved targets, shows what it found for each runner and asks before fixing it (`a` = yes to all the rest).
+6. **Install watchdog**: asks for a target and how often to check (default 5 minutes), confirms, then creates a
+   scheduled task that runs Recover in the background, so a crashed runner comes back by itself.
+7. **Remove watchdog**: shows the task and asks before removing it.
 
 Needs `gh` signed in (`gh auth login`) with admin access to the repositories.
 
@@ -44,7 +47,8 @@ first; the script refuses to run without it. No admin rights needed.
 
    Paste the token at the hidden prompt, or add `-FromClipboard` to read it from the clipboard (cleared afterwards).
 
-Or double-click **`LinuxRunners.cmd`** for a menu: status, add, remove, adopt, recover, watchdog on/off.
+Or double-click **`LinuxRunners.cmd`** for a menu: status, add, remove, adopt, recover, install / remove watchdog. Recover
+and the watchdog prompt the same way as in `Runners.cmd`.
 
 | Command | What it does |
 | --- | --- |
@@ -54,7 +58,8 @@ Or double-click **`LinuxRunners.cmd`** for a menu: status, add, remove, adopt, r
 | `.\LinuxRunners.ps1 remove <host>-linux-2` | Deletes the container and its volume, then prints the GitHub page where you delete the registration. |
 | `.\LinuxRunners.ps1 adopt <container>` | Brings a hand-made runner container under management (see below). |
 | `.\LinuxRunners.ps1 recover [-Target <name>]` | Checks every managed runner and fixes the stuck ones (see [Recover](#recover-and-the-watchdog)). |
-| `.\LinuxRunners.ps1 install-watchdog [-Target <name>]` | Runs `recover` every 5 minutes while you're signed in. |
+| `.\LinuxRunners.ps1 watch [-Target <name>] [-Interval 5]` | Runs `recover` in this window every 5 minutes until Ctrl+C. |
+| `.\LinuxRunners.ps1 install-watchdog [-Target <name>] [-Interval 5]` | Runs `recover` every 5 minutes while you're signed in. |
 | `.\LinuxRunners.ps1 uninstall-watchdog` | Removes that scheduled task. |
 
 **Targets (optional).** To avoid retyping, save a target as `targets\<name>.local.json` (git-ignored, so your real
@@ -101,7 +106,9 @@ repository where pull requests from forks can run workflows.
 ## Recover and the watchdog
 
 A runner that crashed, got OOM-killed or lost its connection stays offline and CI waits on it. `recover` checks
-every runner this computer manages and fixes the stuck ones. It is safe to run anytime: healthy and busy runners are
+every runner this computer manages and fixes the stuck ones. The menus (item 5) are the main way in: pick a saved
+target, see what each stuck runner has, and answer y / N / a (all) before each fix. The commands below do the same
+without asking, for scripts. It is safe to run anytime: healthy and busy runners are
 left alone, and runners it doesn't manage (other computers, `(not adopted)` containers) are never touched.
 
 ```powershell
@@ -128,12 +135,13 @@ is up and wedged. The watchdog is a scheduled task (Task Scheduler > `actions-ru
 5 minutes:
 
 ```powershell
-.\Runners.ps1 install-watchdog -Target my-app      # elevated; -Target is optional
-.\LinuxRunners.ps1 install-watchdog -Target my-app
+.\Runners.ps1 install-watchdog -Target my-app      # elevated; -Target and -Interval (minutes, default 5) optional
+.\LinuxRunners.ps1 install-watchdog -Target my-app -Interval 10
 .\Runners.ps1 uninstall-watchdog                   # and .\LinuxRunners.ps1 uninstall-watchdog
+.\LinuxRunners.ps1 watch -Target my-app            # the same loop in this window, until Ctrl+C
 ```
 
-Or menu 6 in either `.cmd`, which turns it on or off. It runs as you, only while you're signed in: `gh` keeps its
+Or menu 6 (install: asks for the target and interval, then confirms) and 7 (remove) in either `.cmd`. It runs as you, only while you're signed in: `gh` keeps its
 login in your profile, and Docker Desktop only runs then too. A runner that is up but offline may just be updating
 itself, so the watchdog restarts it only once it has seen it like that for 4 minutes (its next run); `recover` run
 by hand acts at once. Reports go to `%LOCALAPPDATA%\actions-runners\windows-watchdog.log` and `linux-watchdog.log`

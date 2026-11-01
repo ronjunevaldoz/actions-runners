@@ -52,16 +52,58 @@ function Uninstall-Watchdog($kind) {
     }
 }
 
-# Menu entry: turns the watchdog off when it is on, else asks for a target and turns it on.
-function Switch-Watchdog($kind, $script, $runLevel) {
+# Menu prompt for a saved target: lists targets\*.json (example.json aside) by number. Returns '' for none.
+function Select-Target($why) {
+    $names = @(Get-ChildItem $TargetsDir -Filter *.json -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'example.json' } |
+        ForEach-Object { $_.Name -replace '(\.local)?\.json$', '' } | Select-Object -Unique)
+    if (-not $names.Count) { return '' }
+    Write-Host "Saved targets ($why):"
+    $i = 0
+    foreach ($n in $names) { $i++; Write-Host ('  {0}) {1}' -f $i, $n) }
+    $pick = (Read-Host 'Target number or name (Enter for none)').Trim()
+    if ($pick -match '^\d+$' -and [int]$pick -ge 1 -and [int]$pick -le $names.Count) { return $names[[int]$pick - 1] }
+    $pick
+}
+
+# Menu entry "Install watchdog": asks for the target and the interval, and confirms before creating the task.
+function Read-WatchdogInstall($kind, $script, $runLevel) {
     $tasks = Get-WatchdogTasks $kind
-    if ($tasks.Count) {
-        Write-Host "Watchdog is on: $(($tasks.TaskName) -join ', '). Log: $(Get-WatchdogLog $kind)"
-        if (Ask 'Turn it off?') { Uninstall-Watchdog $kind }
-        return
+    if ($tasks.Count) { Write-Host "Already installed: $(($tasks.TaskName) -join ', '). The same target replaces its task." -ForegroundColor Yellow }
+    $t = Select-Target 'the repository and labels to keep alive'
+    $m = (Read-Host 'Check every how many minutes [5]').Trim()
+    $minutes = if ($m) { [int]$m } else { 5 }
+    if ($minutes -lt 1) { throw 'The interval is at least 1 minute.' }
+    $for = if ($t) { " for target $t" } else { '' }
+    if (-not (Ask "Create a scheduled task that runs recover every $minutes minutes$for while you're signed in?")) { return }
+    Install-Watchdog $kind $script $t $runLevel $minutes
+}
+
+# Menu entry "Remove watchdog": shows the tasks and asks before removing them.
+function Read-WatchdogRemove($kind) {
+    $tasks = Get-WatchdogTasks $kind
+    if (-not $tasks.Count) { Write-Host 'No watchdog installed.'; return }
+    foreach ($t in $tasks) { Write-Host "  $TaskPath$($t.TaskName) ($($t.State))" }
+    if (Ask 'Remove the watchdog?') { Uninstall-Watchdog $kind }
+}
+
+# "watch": recover in the foreground every $minutes until Ctrl+C, with the watchdog's grace period.
+function Start-Watch($minutes, [scriptblock]$recover) {
+    $script:Unattended = $true
+    while ($true) {
+        try { & $recover } catch { Write-Host "Recover failed: $($_.Exception.Message)" -ForegroundColor Red }
+        Write-Host "Next check in $minutes minutes (Ctrl+C to stop)."
+        Start-Sleep -Seconds ($minutes * 60)
     }
-    $t = (Read-Host 'Target name from targets\ (repository and labels to re-register with; Enter for none)').Trim()
-    Install-Watchdog $kind $script $t $runLevel
+}
+
+# Menu runs ask before each fix: y, N, or a (this one and all the rest). Command-line and watchdog runs don't ask.
+$script:Interactive = $false
+function Confirm-Fix($runner, $problem, $action) {
+    if (-not $script:Interactive -or $script:fixAll) { return $true }
+    Write-Host "  $($runner): $problem" -ForegroundColor Yellow
+    $a = Read-Host "    $action? (y/N, a = yes to all)"
+    if ($a -match '^a') { $script:fixAll = $true }
+    $a -match '^[ya]'
 }
 
 # Unattended runs append their report to the log; it is rolled over to .old past 1 MB.
@@ -84,6 +126,8 @@ function Read-Grace($kind) {
     } catch { $seen = @{} }
     $script:seen = $seen
     $script:pending = @{}
+    $script:queued = @{}
+    $script:fixAll = $false
 }
 
 function Save-Grace($kind) {

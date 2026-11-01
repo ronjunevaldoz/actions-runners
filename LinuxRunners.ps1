@@ -4,7 +4,7 @@
 # Each runner is a container and a volume (the runner's files and work folder), both named gh-runner-<runner name>.
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)][ValidateSet('menu', 'add', 'remove', 'status', 'adopt', 'recover', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
+    [Parameter(Position = 0)][ValidateSet('menu', 'add', 'remove', 'status', 'adopt', 'recover', 'watch', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
     # A number (2 -> <host>-linux-2) or a runner name. For remove: also a container name. For adopt: a container name.
     [Parameter(Position = 1)][string]$Runner,
     [string]$Repo,     # owner/name, for a repository runner
@@ -23,7 +23,8 @@ param(
     # can't silently steal the registration of a runner that is still running somewhere.
     [switch]$Replace,
     # Used by the watchdog task: the recover report goes to its log, and offline runners get a grace period.
-    [switch]$Unattended
+    [switch]$Unattended,
+    [int]$Interval = 5   # minutes between checks, for watch and install-watchdog
 )
 $ErrorActionPreference = 'Stop'
 $Bound = $PSBoundParameters   # what the caller passed; a target file never overrides these
@@ -234,7 +235,7 @@ function Invoke-Adopt($value) {
 function Show-Menu {
     while ($true) {
         Write-Host ''
-        Write-Host 'Linux Docker runners: 1) Status  2) Add  3) Remove  4) Adopt existing container  5) Recover  6) Watchdog on/off  Q) Quit' -ForegroundColor Cyan
+        Write-Host 'Linux Docker runners: 1) Status  2) Add  3) Remove  4) Adopt existing container  5) Recover  6) Install watchdog  7) Remove watchdog  Q) Quit' -ForegroundColor Cyan
         $choice = Read-Host 'Choose'
         try {
             switch ($choice) {
@@ -252,8 +253,14 @@ function Show-Menu {
                 }
                 '3' { Show-Status; Remove-LinuxRunner (Read-Host 'Runner or container name').Trim() }
                 '4' { Show-Status; Invoke-Adopt (Read-Host 'Container name to adopt').Trim() }
-                '5' { Invoke-LinuxRecover }
-                '6' { Switch-Watchdog 'linux' $PSCommandPath 'Limited' }
+                '5' {
+                    $t = Select-Target 'repository and labels to re-register with'
+                    if ($t) { $script:Target = $t; Import-Target }
+                    $script:Interactive = $true
+                    try { Invoke-LinuxRecover } finally { $script:Interactive = $false }
+                }
+                '6' { Read-WatchdogInstall 'linux' $PSCommandPath 'Limited' }
+                '7' { Read-WatchdogRemove 'linux' }
                 { $_ -match '^[qQ]?$' } { return }
             }
         } catch {
@@ -274,7 +281,8 @@ try {
         'status' { Show-Status }
         'adopt' { Invoke-Adopt $Runner }
         'recover' { Invoke-LinuxRecover }
-        'install-watchdog' { Install-Watchdog 'linux' $PSCommandPath $Target 'Limited' }
+        'watch' { Start-Watch $Interval { Invoke-LinuxRecover } }
+        'install-watchdog' { Install-Watchdog 'linux' $PSCommandPath $Target 'Limited' $Interval }
         'uninstall-watchdog' { Uninstall-Watchdog 'linux' }
     }
 } catch {

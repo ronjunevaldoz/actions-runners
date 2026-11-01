@@ -11,6 +11,8 @@ function Set-ServiceRecovery($service) {
 
 # -Target supplies the repository and labels to keep alive; Windows runners are per repository, so it needs "repo".
 function Import-WindowsTarget {
+    $script:TargetRepo = $null
+    $script:TargetLabels = ''
     if (-not $Target) { return }
     $cfg = Read-TargetFile $Target
     if (-not $cfg.repo) { throw "targets\$Target has no repo; Windows runners are registered per repository." }
@@ -72,6 +74,8 @@ function Invoke-Recover {
             $report += New-ReportRow $r.Name $key $problem "none: old folder $($r.Local.Folder), add it again from the menu"
             continue
         }
+        $verb = if ($fix -eq 'Restart') { 'Restart the service' } else { 'Re-register it under the same name' }
+        if (-not (Confirm-Fix $r.Name $problem $verb)) { $report += New-ReportRow $r.Name $key $problem 'skipped'; continue }
         try {
             if ($fix -eq 'Restart') {
                 Restart-Service $r.Local.Service.Name -Force
