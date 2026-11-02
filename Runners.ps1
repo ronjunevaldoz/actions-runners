@@ -1,7 +1,10 @@
-# Manages the self-hosted GitHub Actions runners on this computer. Double-click "Runners.cmd" to open the menu.
-# Runners live in C:\actions-runner\<name>, one per repository, each installed as a Windows service.
+# Manages the self-hosted GitHub Actions runners on this computer, both kinds. Double-click "Runners.cmd" to open the menu.
+# Windows-service runners live in C:\actions-runner\<name>, one per repository, each installed as a Windows service.
+# Docker runners are Linux containers in Docker Desktop; their functions are LinuxRunners.ps1's (lib\Linux.ps1 and
+# lib\RecoverLinux.ps1), so LinuxRunners.ps1 still works on its own.
 # Also runs without the menu (as administrator), for scripts:
 #   .\Runners.ps1 recover|watch|install-watchdog|uninstall-watchdog [-Target <name>] [-Interval <minutes>]
+# recover, watch and the watchdog cover both kinds, and start Docker Desktop when it isn't running.
 param(
     [Parameter(Position = 0)][ValidateSet('menu', 'recover', 'watch', 'install-watchdog', 'uninstall-watchdog')][string]$Command = 'menu',
     [string]$Target,      # targets\<Target>.local.json: the repository and labels recover re-registers a runner with
@@ -12,6 +15,17 @@ $ErrorActionPreference = 'Stop'
 $root = 'C:\actions-runner'
 # Older hand-made installs registered straight into these folders; scanned so leftovers there get cleaned up too.
 $legacy = @($root, "$env:USERPROFILE\actions-runner")
+# Docker Desktop, started by recover and the watchdog when its engine isn't answering, and how long to wait for it.
+$DockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+$DockerStartSeconds = 180
+$script:DockerEngine = ''
+
+# The Docker runner functions read these, which are LinuxRunners.ps1's parameter defaults; a target fills them in.
+$Repo = ''; $Org = ''; $Prefix = [Environment]::MachineName; $Labels = 'docker'; $Memory = '8g'; $Cpus = [double]2
+$FromClipboard = $false; $Replace = $false; $Bound = @{}
+# Loaded before this script's own functions, so this script's Invoke-Gh (defined below) is the one both use.
+. "$PSScriptRoot\lib\Linux.ps1"
+. "$PSScriptRoot\lib\RecoverLinux.ps1"
 
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Ask($question) { (Read-Host "$question (y/N)") -match '^y' }
@@ -68,17 +82,111 @@ function Get-Runners {
     @($rows | Sort-Object Repo, Name)
 }
 
+# 'none' (Docker Desktop isn't installed), 'down' (installed, engine not answering) or 'up'.
+function Get-DockerEngine {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'none' }
+    if (Test-Docker info --format '{{.ServerVersion}}') { return 'up' }
+    'down'
+}
+
+# One row per runner container here (Kind 'docker'), in Get-Runners' shape, with the state of the container and of
+# its registration on GitHub: "container exited (exit 137, OOM-killed)", "running, online", "running, offline on
+# GitHub", "busy", ... Containers LinuxRunners.ps1 doesn't manage show by container name as "not adopted".
+function Get-DockerRunners {
+    $script:remote = @{}
+    foreach ($c in @(Get-Containers)) {
+        $api = $null
+        if ($c.Managed) { $api = Get-ApiScope $c.Page }
+        $repo = '-'
+        $reg = $null
+        $gh = ''
+        if ($api) {
+            $repo = $api -replace '^repos/', '' -replace '^orgs/(.*)$', '$1 (org)'
+            try {
+                # Under the repository's current name, so it matches the Windows rows after a rename or transfer.
+                if ($api -like 'repos/*') { $repo = Resolve-Repo ($api -replace '^repos/', ''); $api = "repos/$repo" }
+                $reg = @(Get-Registered $api | Where-Object { $_.name -eq $c.Runner })[0]
+                if (-not $reg) { $gh = 'not registered on GitHub' }
+                elseif ($reg.busy) { $gh = 'busy' }
+                elseif ($reg.status -eq 'online') { $gh = 'online' }
+                else { $gh = "$($reg.status) on GitHub" }
+            } catch { $gh = 'GitHub unknown' }
+        }
+        $s = $c.Run.Status
+        $oom = if ($c.Run.OOMKilled) { ', OOM-killed' } else { '' }
+        if (-not $c.Managed) { $state = "container $s, not adopted" }
+        elseif ($s -in 'exited', 'created', 'dead') { $state = "container $s (exit $($c.Run.ExitCode)$oom)" }
+        elseif ($s -ne 'running') { $state = "container $s$oom" }
+        elseif (-not $api) { $state = 'running, no GitHub page' }
+        elseif ($gh -eq 'busy') { $state = 'busy' }
+        else { $state = "running, $gh" }
+        $name = if ($c.Managed) { $c.Runner } else { $c.Container }
+        $id = if ($reg) { $reg.id } else { 0 }
+        $labelText = if ($reg) { $reg.labels -join ',' } else { '' }
+        [pscustomobject]@{ Kind = 'docker'; Repo = $repo; Name = $name; Id = $id; Local = $null; State = $state; Labels = $labelText; Container = $c }
+    }
+}
+
+# Every runner of this PC's, both kinds, for List, Remove and Clean up leftovers: Get-Runners' rows (Kind 'windows',
+# or '' for one that is only on GitHub) and Get-DockerRunners' rows. A GitHub-only row for a runner whose container is
+# here is dropped, as the container's row covers it. While Docker Desktop is down, a GitHub-only offline Linux runner
+# that looks like one of this PC's Docker runners (named <host>-linux-..., or labelled docker) says so instead of
+# "offline, not on this PC". Sets $script:DockerEngine for Show-Runners.
+function Get-AllRunners {
+    $script:DockerEngine = Get-DockerEngine
+    $docker = @()
+    if ($script:DockerEngine -eq 'up') {
+        try { $docker = @(Get-DockerRunners) } catch { $script:DockerEngine = "error: $($_.Exception.Message)" }
+    }
+    $unadopted = @($docker | Where-Object { -not $_.Container.Managed }).Count
+    $mine = '^' + [regex]::Escape($env:COMPUTERNAME.ToLower()) + '-linux-'
+    $rows = @()
+    foreach ($r in @(Get-Runners)) {
+        $kind = if ($r.Local) { 'windows' } else { '' }
+        $state = $r.State
+        if (-not $r.Local) {
+            if (@($docker | Where-Object { $_.Name -eq $r.Name -and $_.Repo -eq $r.Repo }).Count) { continue }
+            $labelSet = @("$($r.Labels)" -split ',')
+            if ($labelSet -contains 'Linux' -and $state -like 'offline*') {
+                if ($script:DockerEngine -eq 'down' -and ($r.Name -match $mine -or $labelSet -contains 'docker')) {
+                    $kind = 'docker'
+                    $state = 'Docker Desktop not running'
+                } elseif ($unadopted) {
+                    $state = 'offline, may be an unadopted container'
+                }
+            }
+        }
+        $rows += [pscustomobject]@{ Kind = $kind; Repo = $r.Repo; Name = $r.Name; Id = $r.Id; Local = $r.Local; State = $state
+            Labels = $r.Labels; Container = $null }
+    }
+    @(@($rows) + @($docker) | Sort-Object Repo, Name)
+}
+
 function Show-Runners($rows) {
     Write-Host ''
+    if ($rows.Count) {
+        Write-Host ('{0,3}  {1,-7} {2,-26} {3,-22} {4,-34} {5,-10} {6}' -f '', 'KIND', 'REPOSITORY', 'RUNNER', 'STATE', 'HOST', 'WHERE') -ForegroundColor Cyan
+    }
     $i = 0
     foreach ($r in $rows) {
         $i++
-        $svc = if ($r.Local -and $r.Local.Service) { $r.Local.Service.Status } elseif ($r.Local) { 'no service' } else { '-' }
-        $folder = if ($r.Local) { $r.Local.Folder } else { '' }
-        $color = if ($r.State -in 'online', 'busy') { 'Gray' } else { 'Yellow' }
-        Write-Host ('{0,3}. {1,-26} {2,-22} {3,-24} {4,-10} {5}' -f $i, $r.Repo, $r.Name, $r.State, $svc, $folder) -ForegroundColor $color
+        if ($r.Container) {
+            $svc = $r.Container.Run.Status
+            $folder = "container $($r.Container.Container)"
+        } else {
+            $svc = if ($r.Local -and $r.Local.Service) { $r.Local.Service.Status } elseif ($r.Local) { 'no service' } else { '-' }
+            $folder = if ($r.Local) { $r.Local.Folder } else { '' }
+        }
+        $kind = if ($r.Kind) { $r.Kind } else { '-' }
+        $color = if ($r.State -in 'online', 'busy', 'running, online') { 'Gray' } else { 'Yellow' }
+        Write-Host ('{0,3}. {1,-7} {2,-26} {3,-22} {4,-34} {5,-10} {6}' -f $i, $kind, $r.Repo, $r.Name, $r.State, $svc, $folder) -ForegroundColor $color
     }
     if (-not $rows.Count) { Write-Host '  No runners on this computer.' }
+    if ($script:DockerEngine -eq 'down') {
+        Write-Host "  Docker Desktop is not running, so its runner containers can't be listed. Recover (5) starts it." -ForegroundColor Yellow
+    } elseif ($script:DockerEngine -like 'error*') {
+        Write-Host "  Couldn't list the Docker runners: $($script:DockerEngine -replace '^error: ', '')" -ForegroundColor Yellow
+    }
     Write-Host ''
 }
 
@@ -170,7 +278,7 @@ function Add-Runner {
 }
 
 function Remove-Runner {
-    $rows = Get-Runners
+    $rows = @(Get-AllRunners | Where-Object { $_.Kind -ne 'docker' })
     Show-Runners $rows
     $pick = Read-Host 'Number to remove (Enter to cancel)'
     if (-not $pick) { return }
@@ -190,7 +298,7 @@ function Remove-Runner {
 }
 
 function Clear-Leftovers {
-    $stale = @(Get-Runners | Where-Object { $_.State -in 'gone from GitHub', 'offline, not on this PC' })
+    $stale = @(Get-AllRunners | Where-Object { $_.State -in 'gone from GitHub', 'offline, not on this PC' })
     $empty = @(Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notlike '_*' -and -not (Test-Path "$($_.FullName)\.runner") })
     if (-not $stale.Count -and -not $empty.Count) { Write-Host 'Nothing to clean up.' -ForegroundColor Green; return }
@@ -206,6 +314,87 @@ function Clear-Leftovers {
             Write-Host "  Deleted $($d.FullName)." -ForegroundColor Green
         }
     }
+}
+
+# Starts Docker Desktop and waits up to $DockerStartSeconds for its engine to answer. From an elevated window (this
+# menu, the watchdog task) it is started through Explorer, so it runs as you, unelevated, as from the Start menu.
+function Start-DockerDesktop {
+    if (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue) {
+        Write-Host '  Docker Desktop is open; waiting for its engine...'
+    } else {
+        if (-not (Test-Path $DockerDesktopExe)) { throw "Docker Desktop isn't at $DockerDesktopExe. Start it yourself." }
+        Write-Host '  Starting Docker Desktop...'
+        if ($admin) { Start-Process explorer.exe -ArgumentList "`"$DockerDesktopExe`"" } else { Start-Process $DockerDesktopExe }
+    }
+    $deadline = (Get-Date).AddSeconds($DockerStartSeconds)
+    while (-not (Test-Docker info --format '{{.ServerVersion}}')) {
+        if ((Get-Date) -gt $deadline) { throw "Docker Desktop's engine didn't answer within $DockerStartSeconds seconds. Open Docker Desktop and look." }
+        Start-Sleep -Seconds 5
+    }
+    Write-Host '  Docker Desktop is running.' -ForegroundColor Green
+}
+
+# For Add and Remove of a Docker runner: offers to start Docker Desktop when it is installed but not running.
+function Assert-DockerUp {
+    if ((Get-DockerEngine) -ne 'down') { Assert-Docker; return }
+    if (-not (Ask 'Docker Desktop is not running. Start it now?')) { throw 'Docker runners need Docker Desktop running.' }
+    Start-DockerDesktop
+}
+
+# The Docker half of recover: starts Docker Desktop when its engine isn't answering (from the menu, after asking),
+# then runs LinuxRunners.ps1's recover over the runner containers. Nothing to do without Docker Desktop.
+function Invoke-DockerRecover {
+    $engine = Get-DockerEngine
+    if ($engine -eq 'none') { return }
+    Step 'Docker runners'
+    if ($engine -eq 'down') {
+        if (-not (Confirm-Fix 'Docker Desktop' 'not running, so its runner containers are down' 'Start Docker Desktop')) {
+            Write-Host "  Docker Desktop left off: the Docker runners weren't checked." -ForegroundColor Yellow
+            return
+        }
+        Start-DockerDesktop
+        # The containers start with Docker (--restart unless-stopped); give them time to connect before checking them.
+        Write-Host '  Waiting 30 seconds for the runner containers to connect...'
+        Start-Sleep -Seconds 30
+    }
+    if ($Target) { Import-Target }
+    Invoke-LinuxRecover
+}
+
+# "recover" for both kinds: the Windows-service runners, then the Docker runners. One failing doesn't stop the other.
+function Invoke-AllRecover {
+    $failed = @()
+    Step 'Windows-service runners'
+    try { Invoke-Recover } catch {
+        Write-Host "Recover of the Windows-service runners failed: $($_.Exception.Message)" -ForegroundColor Red
+        $failed += 'Windows-service'
+    }
+    try { Invoke-DockerRecover } catch {
+        Write-Host "Recover of the Docker runners failed: $($_.Exception.Message)" -ForegroundColor Red
+        $failed += 'Docker'
+    }
+    if ($failed.Count) { throw "Recover didn't finish for the $($failed -join ' and ') runners (see above)." }
+}
+
+# Add and Remove ask which kind of runner first.
+function Read-Kind($verb) {
+    $k = (Read-Host "$verb which kind? W) Windows service  D) Docker container (Linux)  [W]").Trim()
+    if ($k -match '^[dD]') { return 'docker' }
+    if ($k -and $k -notmatch '^[wW]') { throw "'$k' isn't W or D." }
+    'windows'
+}
+
+function Add-AnyRunner {
+    if ((Read-Kind 'Add') -eq 'windows') { Add-Runner; return }
+    Assert-DockerUp
+    Read-LinuxAdd
+}
+
+function Remove-AnyRunner {
+    if ((Read-Kind 'Remove') -eq 'windows') { Remove-Runner; return }
+    Assert-DockerUp
+    Show-Status
+    Remove-LinuxRunner (Read-Host 'Runner or container name').Trim()
 }
 
 . "$PSScriptRoot\lib\Watchdog.ps1"
@@ -226,8 +415,8 @@ if ($Command -ne 'menu') {
     try {
         if (-not $admin) { throw "$Command needs admin rights: run it from an elevated PowerShell, or use Runners.cmd." }
         switch ($Command) {
-            'recover' { Invoke-Recover }
-            'watch' { Start-Watch $Interval { Invoke-Recover } }
+            'recover' { Invoke-AllRecover }
+            'watch' { Start-Watch $Interval { Invoke-AllRecover } }
             'install-watchdog' { Import-WindowsTarget; Install-Watchdog 'windows' $PSCommandPath $Target 'Highest' $Interval }
             'uninstall-watchdog' { Uninstall-Watchdog 'windows' }
         }
@@ -243,18 +432,18 @@ if (-not $admin) { Write-Host 'Not running as administrator: listing works, but 
 
 while ($true) {
     Write-Host ''
-    Write-Host 'GitHub runners: 1) List  2) Add  3) Remove  4) Clean up leftovers  5) Recover  6) Install watchdog  7) Remove watchdog  Q) Quit' -ForegroundColor Cyan
+    Write-Host 'GitHub runners (Windows services and Docker): 1) List  2) Add  3) Remove  4) Clean up leftovers  5) Recover  6) Install watchdog  7) Remove watchdog  Q) Quit' -ForegroundColor Cyan
     $choice = Read-Host 'Choose'
     try {
         switch ($choice) {
-            '1' { Show-Runners (Get-Runners) }
-            '2' { Add-Runner }
-            '3' { Remove-Runner }
+            '1' { Show-Runners (Get-AllRunners) }
+            '2' { Add-AnyRunner }
+            '3' { Remove-AnyRunner }
             '4' { Clear-Leftovers }
             '5' {
                 $script:Target = Select-Target 'repository and labels to re-register with'
                 $script:Interactive = $true
-                try { Invoke-Recover } finally { $script:Interactive = $false }
+                try { Invoke-AllRecover } finally { $script:Interactive = $false }
             }
             '6' { Read-WatchdogInstall 'windows' $PSCommandPath 'Highest' }
             '7' { Read-WatchdogRemove 'windows' }

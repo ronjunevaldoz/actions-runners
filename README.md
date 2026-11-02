@@ -1,19 +1,31 @@
 # Self-hosted GitHub Actions runners
 
-Double-click **`Runners.cmd`**. Windows asks for admin rights once, then a menu offers:
+Double-click **`Runners.cmd`**: it is the one menu for every runner on this computer, both the Windows-service
+runners and the [Linux runners in Docker Desktop](#linux-docker-runners). Windows asks for admin rights once, then
+the menu offers:
 
-1. **List** every runner on this computer and its state on GitHub (leftovers show in yellow).
-2. **Add** a runner: asks for the repository, a name and optional labels, then registers it and installs it as a
-   Windows service. The suggested name is the next free `<host>-windows-<n>` (`<host>` is this computer's name,
-   lowercased), so accepting it adds another runner. Typing a name that already exists replaces it, which also
-   re-registers a broken runner.
-3. **Remove** a runner: pick it by number. It deletes the service and the registration, and optionally the folder.
-4. **Clean up leftovers**: registrations GitHub has forgotten, offline runners with no folder here, and folders
-   with nothing registered in them. Asks before each one.
-5. **Recover**: brings back runners that are stuck (see [Recover and the watchdog](#recover-and-the-watchdog)). Offers
-   your saved targets, shows what it found for each runner and asks before fixing it (`a` = yes to all the rest).
+1. **List** every runner on this computer, both kinds in one table, with its real state (problems show in yellow).
+   A Windows runner shows its state on GitHub and its service. A Docker runner shows `Docker Desktop not running`,
+   `container exited (exit 137, OOM-killed)` (or stopped, restarting, paused), `running, online`,
+   `running, offline on GitHub` or `busy`.
+2. **Add** a runner: asks which kind, **W**indows service or **D**ocker container.
+   - Windows: asks for the repository, a name and optional labels, then registers it and installs it as a Windows
+     service. The suggested name is the next free `<host>-windows-<n>` (`<host>` is this computer's name,
+     lowercased), so accepting it adds another runner. Typing a name that already exists replaces it, which also
+     re-registers a broken runner.
+   - Docker: asks for a saved target or the repository, the runner number or name, labels, limits and the token,
+     as described under [Linux Docker runners](#linux-docker-runners). Offers to start Docker Desktop if it isn't
+     running.
+3. **Remove** a runner: asks which kind. A Windows runner is picked by number; it deletes the service and the
+   registration, and optionally the folder. A Docker runner is picked by name; it deletes the container and its
+   volume, then prints the GitHub page where you delete the registration.
+4. **Clean up leftovers**: registrations GitHub has forgotten, offline runners with no folder or container here,
+   and folders with nothing registered in them. Asks before each one.
+5. **Recover**: brings back runners of both kinds that are stuck, and starts Docker Desktop if it isn't running (see
+   [Recover and the watchdog](#recover-and-the-watchdog)). Offers your saved targets, shows what it found for each
+   runner and asks before fixing it (`a` = yes to all the rest).
 6. **Install watchdog**: asks for a target and how often to check (default 5 minutes), confirms, then creates a
-   scheduled task that runs Recover in the background, so a crashed runner comes back by itself.
+   scheduled task that runs Recover in the background, so a crashed runner, of either kind, comes back by itself.
 7. **Remove watchdog**: shows the task and asks before removing it.
 
 Needs `gh` signed in (`gh auth login`) with admin access to the repositories.
@@ -21,11 +33,25 @@ Needs `gh` signed in (`gh auth login`) with admin access to the repositories.
 Runners live in `C:\actions-runner\<name>`, never in this repo, so no credentials or tokens end up in git.
 A workflow picks a runner with `runs-on: [self-hosted, Windows, <label>]`.
 
+## Which runner runs what
+
+| Repository | Runners |
+| --- | --- |
+| `flyffawaken/flyffawaken` | Self-hosted only. Linux jobs (PR checks, server image, release, server deploy, play content) run on the Docker runner: label `docker`, picked through the repository variables `RUNNER_PR_LINUX` and `RUNNER_PR_LINUX_2` (both `docker`). GPU screenshot tests and the web deploy run on `[self-hosted, Windows, X64]`. Desktop installers are manual only (Actions > Desktop installers > Run workflow); the Windows and macOS installers use GitHub-hosted runners and need the organization's billing. |
+| `awakekt/awake-plugins` | Its Windows self-hosted runner. |
+| `awakekt/awake-studio` | Its Windows self-hosted runners. |
+| `awakekt/awake` (Core) | GitHub-hosted and Blacksmith runners; no runners on this PC. |
+
+Have Docker Desktop start when you sign in (Docker Desktop > Settings > General > Start Docker Desktop when you sign
+in to your computer), so the Docker runner is up without anyone opening it. The watchdog starts it too.
+
 ## Linux Docker runners
 
 Linux runners run as containers in Docker Desktop, from GitHub's runner image
-(`ghcr.io/actions/actions-runner`), and use the host's Docker engine for jobs that need Docker. Start Docker Desktop
-first; the script refuses to run without it. No admin rights needed.
+(`ghcr.io/actions/actions-runner`), and use the host's Docker engine for jobs that need Docker. Manage them from
+**`Runners.cmd`** like the Windows runners (List, Add, Remove, Recover and the watchdog all cover them).
+`LinuxRunners.ps1` still works on its own, for the commands below and for scripts; it needs Docker Desktop running and
+no admin rights.
 
 - Runner names: `<host>-linux-<n>`, where `<host>` is this computer's name, lowercased. `-Prefix` changes the host
   part; giving a name instead of a number (`add my-runner ...`) sets the whole name.
@@ -33,7 +59,7 @@ first; the script refuses to run without it. No admin rights needed.
 - Labels: `self-hosted, Linux, X64` plus `docker` by default, so a workflow picks one with
   `runs-on: [self-hosted, Linux, docker]`. Extra labels go in `-Labels docker,gradle`.
 
-**Add a runner for a repository:**
+**Add a runner for a repository** (or **Add** > **D** in `Runners.cmd`, which asks the same questions):
 
 1. On GitHub: the repository's Settings > Actions > Runners > New self-hosted runner. Copy the `--token` value from
    the Configure step (it expires after an hour). The script prints this link too.
@@ -47,8 +73,9 @@ first; the script refuses to run without it. No admin rights needed.
 
    Paste the token at the hidden prompt, or add `-FromClipboard` to read it from the clipboard (cleared afterwards).
 
-Or double-click **`LinuxRunners.cmd`** for a menu: status, add, remove, adopt, recover, install / remove watchdog. Recover
-and the watchdog prompt the same way as in `Runners.cmd`.
+`LinuxRunners.cmd` still opens its own Docker-only menu (status, add, remove, adopt, recover, install / remove
+watchdog), after a line saying that `Runners.cmd` is the main menu. Adopting a hand-made container is only there, or
+`.\LinuxRunners.ps1 adopt`.
 
 | Command | What it does |
 | --- | --- |
@@ -59,13 +86,13 @@ and the watchdog prompt the same way as in `Runners.cmd`.
 | `.\LinuxRunners.ps1 adopt <container>` | Brings a hand-made runner container under management (see below). |
 | `.\LinuxRunners.ps1 recover [-Target <name>]` | Checks every managed runner and fixes the stuck ones (see [Recover](#recover-and-the-watchdog)). |
 | `.\LinuxRunners.ps1 watch [-Target <name>] [-Interval 5]` | Runs `recover` in this window every 5 minutes until Ctrl+C. |
-| `.\LinuxRunners.ps1 install-watchdog [-Target <name>] [-Interval 5]` | Runs `recover` every 5 minutes while you're signed in. |
+| `.\LinuxRunners.ps1 install-watchdog [-Target <name>] [-Interval 5]` | A Docker-only watchdog. Refused while the `Runners.cmd` watchdog is installed, which already covers Docker runners. |
 | `.\LinuxRunners.ps1 uninstall-watchdog` | Removes that scheduled task. |
 
 **Targets (optional).** To avoid retyping, save a target as `targets\<name>.local.json` (git-ignored, so your real
 repositories stay off GitHub) and use `-Target <name>`. Start from `targets\example.json`; it takes `repo` or
 `org`, `prefix`, `labels`, `memory` and `cpus`. Values on the command line win over the file. `Runners.ps1` reads the
-same files for `recover` (only `repo` and `labels`).
+same files for `recover`: only `repo` and `labels` for the Windows runners, all of it for the Docker runners.
 
 How it works:
 
@@ -75,7 +102,7 @@ How it works:
   `docker inspect gh-runner-<runner name> --format '{{json .Config.Env}}'`: no `RUNNER_TOKEN`.
 - The container restarts with Docker Desktop and after a crash (`--restart unless-stopped`; `recover` puts the policy
   back if it was changed) and keeps logs to 3 x 10 MB.
-- The image version is set once, at the top of `LinuxRunners.ps1` (`$Image`), and only matters for new runners:
+- The image version is set once, at the top of `lib\Linux.ps1` (`$Image`), and only matters for new runners:
   a runner updates itself inside its volume.
 - Memory and CPU limits cover the runner container only. Containers a job starts on the host engine (services,
   `docker build`) are siblings and count against Docker Desktop's own limit (Settings > Resources).
@@ -112,9 +139,14 @@ without asking, for scripts. It is safe to run anytime: healthy and busy runners
 left alone, and runners it doesn't manage (other computers, `(not adopted)` containers) are never touched.
 
 ```powershell
-.\Runners.ps1 recover                         # Windows runners, from an elevated PowerShell (or menu 5 in Runners.cmd)
-.\LinuxRunners.ps1 recover -Target my-app      # Linux runners (or menu 5 in LinuxRunners.cmd)
+.\Runners.ps1 recover                         # both kinds, from an elevated PowerShell (or menu 5 in Runners.cmd)
+.\LinuxRunners.ps1 recover -Target my-app      # Docker runners only (or menu 5 in LinuxRunners.cmd)
 ```
+
+`Runners.ps1 recover` checks the Windows-service runners first, then the Docker runners. If Docker Desktop is
+installed but not running, it starts it (`%ProgramFiles%\Docker\Docker\Docker Desktop.exe`, as you, not as admin),
+waits up to 3 minutes for `docker info` to answer and 30 seconds for the containers to connect, then recovers them.
+From the menu it asks before starting Docker Desktop. `LinuxRunners.ps1 recover` doesn't start Docker Desktop.
 
 | Found | Windows runner | Linux runner |
 | --- | --- | --- |
@@ -131,21 +163,23 @@ the runner's) or the default (`docker` for Linux). `recover` also makes Windows 
 itself (service recovery: after a minute, up to three times a day), the counterpart of Docker's restart policy.
 
 **Watchdog.** Docker's restart policy and the service recovery bring back a process that died, but not a runner that
-is up and wedged. The watchdog is a scheduled task (Task Scheduler > `actions-runners`) that runs `recover` every
-5 minutes:
+is up and wedged, nor Docker Desktop if it was closed. The watchdog is one scheduled task (Task Scheduler >
+`actions-runners` > `windows-recover`) that runs `Runners.ps1 recover` every 5 minutes, so it covers both kinds and
+starts Docker Desktop when it isn't running:
 
 ```powershell
 .\Runners.ps1 install-watchdog -Target my-app      # elevated; -Target and -Interval (minutes, default 5) optional
-.\LinuxRunners.ps1 install-watchdog -Target my-app -Interval 10
-.\Runners.ps1 uninstall-watchdog                   # and .\LinuxRunners.ps1 uninstall-watchdog
-.\LinuxRunners.ps1 watch -Target my-app            # the same loop in this window, until Ctrl+C
+.\Runners.ps1 uninstall-watchdog
+.\Runners.ps1 watch -Target my-app                 # the same loop in this window, until Ctrl+C
 ```
 
-Or menu 6 (install: asks for the target and interval, then confirms) and 7 (remove) in either `.cmd`. It runs as you, only while you're signed in: `gh` keeps its
-login in your profile, and Docker Desktop only runs then too. A runner that is up but offline may just be updating
+Or menu 6 (install: asks for the target and interval, then confirms) and 7 (remove) in `Runners.cmd`. Installing it
+removes the Docker-only task that `LinuxRunners.ps1 install-watchdog` used to create (`linux-recover`), so the two
+don't both fix the same containers; while it is installed, `LinuxRunners.ps1` refuses to add that task again. It runs
+as you, only while you're signed in: `gh` keeps its login in your profile, and Docker Desktop only runs then too. A runner that is up but offline may just be updating
 itself, so the watchdog restarts it only once it has seen it like that for 4 minutes (its next run); `recover` run
-by hand acts at once. Reports go to `%LOCALAPPDATA%\actions-runners\windows-watchdog.log` and `linux-watchdog.log`
-(rolled over at 1 MB).
+by hand acts at once. Reports, for both kinds, go to `%LOCALAPPDATA%\actions-runners\windows-watchdog.log` (rolled over
+at 1 MB; a Docker-only watchdog wrote to `linux-watchdog.log`).
 
 ## Keeping builds fast (Defender exclusions)
 
