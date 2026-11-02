@@ -150,13 +150,23 @@ function Start-RunnerContainer($container, $runner, $volume, $page) {
 # in a command line, an environment variable or the runner container's config. The volume keeps the registration.
 # No double quotes in $cfg: Windows PowerShell mangles them in native arguments. Tokens are alphanumeric.
 # $reset first deletes the old registration in the volume, so recover can re-register a runner under the same name.
+# A console set to UTF-8 makes Windows PowerShell write a byte order mark before the piped token, which config.sh
+# rejects ("Request headers must contain only ASCII characters"), so the pipe runs with BOM-less UTF-8.
 function Register-Volume($volume, $name, $url, $labelList, $token, $replace, $reset) {
     $cfg = 'cd /home/runner && ' +
         $(if ($reset) { 'rm -f .runner .runner_migrated .credentials .credentials_migrated .credentials_rsaparams && ' } else { '' }) +
         "read -r RUNNER_TOKEN && RUNNER_TOKEN=`${RUNNER_TOKEN%`$'\r'} && " +
         "./config.sh --unattended --url '$url' --token `$RUNNER_TOKEN --name '$name' --work _work" +
         $(if ($labelList) { " --labels '$labelList'" } else { '' }) + $(if ($replace) { ' --replace' } else { '' })
-    $token | & docker run --rm -i -v "${volume}:/home/runner" --entrypoint bash $Image -c $cfg | Out-Host
+    $noBom = New-Object System.Text.UTF8Encoding $false
+    $savedInput = $null
+    try { $savedInput = [Console]::InputEncoding; [Console]::InputEncoding = $noBom } catch { }  # no console (watchdog)
+    $OutputEncoding = $noBom
+    try {
+        $token | & docker run --rm -i -v "${volume}:/home/runner" --entrypoint bash $Image -c $cfg | Out-Host
+    } finally {
+        if ($savedInput) { try { [Console]::InputEncoding = $savedInput } catch { } }
+    }
     $LASTEXITCODE -eq 0
 }
 
