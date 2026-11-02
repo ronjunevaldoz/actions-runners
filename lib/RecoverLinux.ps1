@@ -1,4 +1,5 @@
-# "recover" for LinuxRunners.ps1 (dot-sourced by it, so it uses its Get-Containers, Register-Volume and Invoke-Docker):
+# "recover" for the Docker runners, dot-sourced by LinuxRunners.ps1 and Runners.ps1 (it uses lib\Linux.ps1's
+# Get-Containers, Register-Volume and Invoke-Docker):
 # finds managed runner containers that exited or were OOM-killed, are stuck restarting, are up but offline on GitHub,
 # sit idle while their jobs wait in the queue, or lost their registration, and brings them back. Busy and online
 # runners are never touched, and neither are containers this script doesn't manage (status shows "(not adopted)").

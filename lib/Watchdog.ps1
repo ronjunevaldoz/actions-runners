@@ -26,8 +26,13 @@ function Get-WatchdogTasks($kind) {
 # One task per script and target (<kind>-recover or <kind>-recover-<target>), running "recover -Unattended" every
 # $minutes. It runs as you and only while you're signed in: gh keeps its login in your profile, and Docker Desktop
 # only runs then anyway. conhost --headless keeps a console window from flashing up on every run.
+# Runners.ps1's task ('windows') recovers the Docker runners too, so installing it removes a Linux-only task, and a
+# Linux-only task isn't installed next to it: two watchdogs would fix the same containers at the same time.
 function Install-Watchdog($kind, $script, $target, $runLevel, $minutes = 5) {
     if ($target -and $target -notmatch '^[\w.-]+$') { throw "'$target' isn't a target name." }
+    if ($kind -eq 'linux' -and (Get-WatchdogTasks 'windows').Count) {
+        throw "Runners.cmd's watchdog ($TaskPath$((Get-WatchdogTasks 'windows')[0].TaskName)) already recovers the Docker runners. Use that one, or remove it there first."
+    }
     if ($target) { Read-TargetFile $target | Out-Null }
     $name = "$kind-recover" + $(if ($target) { "-$target" } else { '' })
     $arg = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" recover -Unattended"
@@ -40,6 +45,12 @@ function Install-Watchdog($kind, $script, $target, $runLevel, $minutes = 5) {
     Register-ScheduledTask -TaskPath $TaskPath -TaskName $name -Action $action -Trigger $trigger -Principal $principal `
         -Settings $settings -Force | Out-Null
     Write-Host "Watchdog on: task $TaskPath$name runs recover every $minutes minutes while you're signed in." -ForegroundColor Green
+    if ($kind -eq 'windows') {
+        foreach ($t in Get-WatchdogTasks 'linux') {
+            Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $t.TaskName -Confirm:$false
+            Write-Host "Removed the Linux-only watchdog $TaskPath$($t.TaskName): this one recovers the Docker runners too." -ForegroundColor Green
+        }
+    }
     Write-Host "Its reports go to $(Get-WatchdogLog $kind)"
 }
 
