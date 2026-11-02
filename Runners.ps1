@@ -89,21 +89,19 @@ function Remove-Service($local) {
     if ($LASTEXITCODE -ne 0) { throw "Couldn't delete service $($local.Service.Name)." }
 }
 
-# Undoes a registration in a folder. config.cmd remove hangs when GitHub already deleted the runner,
-# so in that case the registration files are deleted directly.
+# Undoes a registration in a folder: deletes the runner on GitHub through the API, under the repository's
+# current name, then deletes the registration files. config.cmd remove isn't used: it sends the request to the
+# address the runner was registered at, which a transferred or renamed repository no longer answers (404 from
+# actions/runner-registration), and it hangs when GitHub already deleted the runner.
 function Clear-Registration($local) {
     Remove-Service $local
     $repo = Resolve-Repo $local.Repo
     if (Get-Remote $repo | Where-Object { $_.id -eq $local.Id }) {
-        $token = Invoke-Gh api -X POST "repos/$repo/actions/runners/remove-token" --jq .token
-        Push-Location $local.Folder
-        try { & .\config.cmd remove --token $token } finally { Pop-Location }
-        if ($LASTEXITCODE -ne 0) { throw 'config.cmd remove failed.' }
-    } else {
-        foreach ($f in '.runner', '.runner_migrated', '.credentials', '.credentials_rsaparams', '.credentials_migrated', '.service') {
-            $path = Join-Path $local.Folder $f
-            if (Test-Path $path) { Remove-Item $path -Force }
-        }
+        Invoke-Gh api -X DELETE "repos/$repo/actions/runners/$($local.Id)" | Out-Null
+    }
+    foreach ($f in '.runner', '.runner_migrated', '.credentials', '.credentials_rsaparams', '.credentials_migrated', '.service') {
+        $path = Join-Path $local.Folder $f
+        if (Test-Path $path) { Remove-Item $path -Force }
     }
 }
 
